@@ -1,122 +1,155 @@
 # client.py
 import socket
 import threading
+import struct
 import sys
 import time
 
-def forward_data(source_socket, dest_socket, direction):
-    """
-    ฟังก์ชันสำหรับส่งต่อข้อมูลระหว่าง Socket สองตัว
-    """
+def forward_from_local_to_server(local_conn, server_conn, player_id):
+    """อ่านข้อมูลจาก Local Service, ใส่ Header, แล้วส่งไปให้ Server"""
     try:
         while True:
-            data = source_socket.recv(4096)
+            data = local_conn.recv(4096)
             if not data:
                 break
-            dest_socket.sendall(data)
+            header = struct.pack('!II', player_id, len(data))
+            server_conn.sendall(header + data)
     except (ConnectionResetError, BrokenPipeError, OSError):
-        pass # ปล่อยให้ thread จบการทำงานไปเงียบๆ
+        pass
     finally:
-        # ส่งสัญญาณ shutdown เพื่อบอกอีกฝั่งว่าจะไม่มีข้อมูลส่งไปแล้ว
-        try:
-            dest_socket.shutdown(socket.SHUT_WR)
-        except OSError:
-            pass
+        # เมื่อ Local Service ปิดการเชื่อมต่อ (อาจไม่เกิดขึ้นบ่อย)
+        # เราควรแจ้ง Server แต่การปิดจากฝั่ง Server/Peer เป็นเรื่องปกติกว่า
+        local_conn.close()
 
-def run_single_session(server_ip, server_port, local_port, local_host):
+
+def forward_from_server_to_local(server_conn, local_target_addr):
     """
-    ฟังก์ชันสำหรับจัดการการเชื่อมต่อ 1 เซสชันเต็ม (เชื่อมต่อ, relay, จบการทำงาน)
+    [หัวใจหลัก] อ่านข้อมูลจาก Server, แกะ Header,
+    แล้วสร้าง/จัดการการเชื่อมต่อย่อยไปยัง Local Service
     """
-    server_conn = None
-    local_conn = None
+    local_connections = {}
+    local_lock = threading.Lock()
+
     try:
-        # --- ส่วนที่ 1: เชื่อมต่อไปยัง Server กลาง ---
-        server_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        print(f"[*] Establishing tunnel to relay server {server_ip}:{server_port}...")
-        server_conn.connect((server_ip, server_port))
-        
-        response = server_conn.recv(1024).decode()
-        if not response.startswith("PUBLIC_PORT:"):
-            print(f"[-] Server error: {response}")
-            return # จบการทำงานของเซสชันนี้
-        
-        public_port = response.split(":")[1]
-        print("="*40)
-        print("  SUCCESS! TUNNEL IS ESTABLISHED.")
-        print(f"  Your service is available at:")
-        print(f"  IP Address: {server_ip}")
-        print(f"  Port: {public_port}")
-        print("  Waiting for a player to connect...")
-        print("="*40)
-
-        # --- ส่วนที่ 2: เชื่อมต่อไปยัง Service ในเครื่อง ---
-        # จะรอจนกว่าจะเชื่อมต่อกับ Service ในเครื่องได้สำเร็จ
         while True:
-            try:
-                local_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                local_conn.connect((local_host, local_port))
-                print(f"[+] Connected to local service at {local_host}:{local_port}.")
-                break # ออกจาก Loop เมื่อเชื่อมต่อสำเร็จ
-            except ConnectionRefusedError:
-                print(f"[!] Connection to local service ({local_host}:{local_port}) refused. Is it running?")
-                print("[*] Retrying in 10 seconds... (Press Ctrl+C to stop this session)")
-                time.sleep(10)
-        
-        # --- ส่วนที่ 3: เริ่ม Relay ข้อมูล ---
-        print("[*] Relay is now active. Forwarding data until player disconnects.")
-        server_to_local_thread = threading.Thread(target=forward_data, args=(server_conn, local_conn, "Server -> Local"))
-        local_to_server_thread = threading.Thread(target=forward_data, args=(local_conn, server_conn, "Local -> Server"))
+            # อ่าน Header 8 bytes
+            header_data = server_conn.recv(8)
+            if not header_data:
+                print("[Tunnel] Server closed the connection.")
+                break
+            
+            player_id, length = struct.unpack('!II', header_data)
+            
+            # อ่านข้อมูลตามความยาวที่ระบุ
+            data = b''
+            while len(data) < length:
+                chunk = server_conn.recv(length - len(data))
+                if not chunk:
+                    raise ConnectionError("Tunnel connection lost while reading data.")
+                data += chunk
 
-        server_to_local_thread.start()
-        local_to_server_thread.start()
+            with local_lock:
+                # กรณีผู้เล่นใหม่
+                if player_id not in local_connections:
+                    # ถ้า length เป็น 0 หมายถึงเป็นแค่สัญญาณว่าผู้เล่นเก่าหลุด ไม่ต้องทำอะไร
+                    if length == 0:
+                        continue
+                    
+                    print(f"[Player {player_id}] New connection detected. Connecting to local service...")
+                    try:
+                        local_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        local_conn.connect(local_target_addr)
+                        local_connections[player_id] = local_conn
+                        
+                        # เริ่ม Thread ส่งข้อมูลจาก Local -> Server สำหรับผู้เล่นคนนี้
+                        upstream_thread = threading.Thread(target=forward_from_local_to_server, args=(local_conn, server_conn, player_id))
+                        upstream_thread.start()
+                        print(f"[Player {player_id}] Local connection established.")
+                    except ConnectionRefusedError:
+                        print(f"[!] Could not connect to local service for Player {player_id}.")
+                        continue # ข้ามผู้เล่นคนนี้ไป
 
-        server_to_local_thread.join()
-        local_to_server_thread.join()
-        
-    except (ConnectionRefusedError, socket.timeout, OSError) as e:
-        print(f"\n[!] Could not connect to relay server: {e}")
-    except KeyboardInterrupt:
-        # ดักจับ Ctrl+C ระหว่างรอเชื่อม local service
-        raise # ส่งต่อไปให้ loop หลักจัดการ
-    except Exception as e:
-        print(f"\n[!] An unexpected error occurred in session: {e}")
+                # ถ้า length เป็น 0 หมายถึงผู้เล่นคนนี้หลุดการเชื่อมต่อ
+                if length == 0:
+                    if player_id in local_connections:
+                        print(f"[Player {player_id}] Disconnection signal received. Closing local connection.")
+                        local_connections[player_id].close()
+                        del local_connections[player_id]
+                    continue
+
+                # ส่งข้อมูลไปยัง Local Service ที่ถูกต้อง
+                if player_id in local_connections:
+                    local_connections[player_id].sendall(data)
+
+    except (ConnectionResetError, BrokenPipeError, OSError, ConnectionError) as e:
+        print(f"[Tunnel] Connection error: {e}")
     finally:
-        if server_conn:
-            server_conn.close()
-        if local_conn:
-            local_conn.close()
-        print("\n[*] Session ended.")
+        print("[Tunnel] Shutting down all local connections.")
+        with local_lock:
+            for conn in local_connections.values():
+                conn.close()
+        server_conn.close()
+
+
+def request_public_port(server_ip, server_control_port):
+    """เชื่อมต่อไปยัง Server เพื่อขอ Public Port แค่ครั้งเดียว"""
+    try:
+        print(f"[*] Requesting a public port from {server_ip}:{server_control_port}...")
+        req_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        req_socket.connect((server_ip, server_control_port))
+        response = req_socket.recv(1024).decode()
+        req_socket.close()
+        if response.startswith("ERROR"):
+            print(f"[-] Server could not assign a port: {response}")
+            return None
+        return int(response)
+    except Exception as e:
+        print(f"[!] Failed to request port: {e}")
+        return None
 
 def main():
-    """
-    [แก้ไข] ฟังก์ชันหลักที่มี Loop ครอบการทำงานทั้งหมด
-    เพื่อให้โปรแกรมทำงานต่อเนื่องและเริ่มเซสชันใหม่เองอัตโนมัติ
-    """
+    """ฟังก์ชันหลัก ทำหน้าที่ขอ Port, สร้างอุโมงค์, แล้วเริ่มระบบจัดการผู้เล่น"""
     if len(sys.argv) != 4:
-        print("Usage: python client.py <server_ip> <server_port> <local_port>")
+        print("Usage: python client.py <server_ip> <control_port> <local_port>")
         print("Example: python client.py 203.0.113.10 9000 25565")
         sys.exit(1)
 
     SERVER_IP = sys.argv[1]
-    SERVER_PORT = int(sys.argv[2])
+    SERVER_CONTROL_PORT = int(sys.argv[2])
     LOCAL_PORT = int(sys.argv[3])
     LOCAL_HOST = '127.0.0.1'
 
+    # 1. ขอ Public Port มาแค่ครั้งเดียว
+    public_port = request_public_port(SERVER_IP, SERVER_CONTROL_PORT)
+    if not public_port:
+        print("[!] Could not get a public port. Exiting.")
+        return
+
+    print("="*40)
+    print("  SUCCESS! YOUR PERMANENT PORT IS ASSIGNED.")
+    print(f"  Your service is available at:")
+    print(f"  IP Address: {SERVER_IP}")
+    print(f"  Port: {public_port}")
+    print("="*40)
+    
     try:
-        while True:
-            run_single_session(SERVER_IP, SERVER_PORT, LOCAL_PORT, LOCAL_HOST)
-            print("="*40)
-            print("  READY FOR A NEW SESSION.")
-            print("  Starting next session in 5 seconds...")
-            print("  (Press Ctrl+C to stop the program)")
-            print("="*40)
-            time.sleep(5)
+        # 2. สร้างอุโมงค์ถาวรไปยัง Public Port
+        print(f"[*] Establishing persistent tunnel to {SERVER_IP}:{public_port}...")
+        server_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        server_conn.connect((SERVER_IP, public_port))
+        print("[+] Tunnel established. Ready to accept multiple players.")
+        
+        # 3. เริ่ม Thread หลักที่คอยจัดการข้อมูลจากอุโมงค์
+        main_thread = threading.Thread(target=forward_from_server_to_local, args=(server_conn, (LOCAL_HOST, LOCAL_PORT)))
+        main_thread.start()
+        main_thread.join() # รอจนกว่าอุโมงค์จะถูกปิด
 
     except KeyboardInterrupt:
-        print("\n[*] Program stopped by user. Exiting.")
+        print("\n[*] Program stopped by user.")
+    except Exception as e:
+        print(f"\n[!] A critical error occurred: {e}")
     finally:
         print("[*] Final cleanup complete.")
-
 
 if __name__ == "__main__":
     main()
