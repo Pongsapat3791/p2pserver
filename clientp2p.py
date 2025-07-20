@@ -15,12 +15,9 @@ def forward_from_local_to_server(local_conn, server_conn, player_id):
             header = struct.pack('!II', player_id, len(data))
             server_conn.sendall(header + data)
     except (ConnectionResetError, BrokenPipeError, OSError):
+        # เมื่อ Socket ถูกปิดโดย Thread อื่น, Thread นี้จะจบการทำงานไปเงียบๆ
         pass
-    finally:
-        # เมื่อ Local Service ปิดการเชื่อมต่อ (อาจไม่เกิดขึ้นบ่อย)
-        # เราควรแจ้ง Server แต่การปิดจากฝั่ง Server/Peer เป็นเรื่องปกติกว่า
-        local_conn.close()
-
+    # [แก้ไข] นำ local_conn.close() ออกไป เพราะ Thread หลักจะเป็นผู้จัดการ
 
 def forward_from_server_to_local(server_conn, local_target_addr):
     """
@@ -32,26 +29,33 @@ def forward_from_server_to_local(server_conn, local_target_addr):
 
     try:
         while True:
-            # อ่าน Header 8 bytes
-            header_data = server_conn.recv(8)
-            if not header_data:
+            # อ่าน Header 8 bytes ให้ครบถ้วน
+            header_buffer = b''
+            while len(header_buffer) < 8:
+                packet = server_conn.recv(8 - len(header_buffer))
+                if not packet:
+                    header_buffer = None
+                    break
+                header_buffer += packet
+            
+            if not header_buffer:
                 print("[Tunnel] Server closed the connection.")
                 break
             
-            player_id, length = struct.unpack('!II', header_data)
+            player_id, length = struct.unpack('!II', header_buffer)
             
             # อ่านข้อมูลตามความยาวที่ระบุ
             data = b''
-            while len(data) < length:
-                chunk = server_conn.recv(length - len(data))
-                if not chunk:
-                    raise ConnectionError("Tunnel connection lost while reading data.")
-                data += chunk
+            if length > 0:
+                while len(data) < length:
+                    chunk = server_conn.recv(length - len(data))
+                    if not chunk:
+                        raise ConnectionError("Tunnel connection lost while reading data payload.")
+                    data += chunk
 
             with local_lock:
                 # กรณีผู้เล่นใหม่
                 if player_id not in local_connections:
-                    # ถ้า length เป็น 0 หมายถึงเป็นแค่สัญญาณว่าผู้เล่นเก่าหลุด ไม่ต้องทำอะไร
                     if length == 0:
                         continue
                     
@@ -61,25 +65,28 @@ def forward_from_server_to_local(server_conn, local_target_addr):
                         local_conn.connect(local_target_addr)
                         local_connections[player_id] = local_conn
                         
-                        # เริ่ม Thread ส่งข้อมูลจาก Local -> Server สำหรับผู้เล่นคนนี้
                         upstream_thread = threading.Thread(target=forward_from_local_to_server, args=(local_conn, server_conn, player_id))
                         upstream_thread.start()
                         print(f"[Player {player_id}] Local connection established.")
                     except ConnectionRefusedError:
                         print(f"[!] Could not connect to local service for Player {player_id}.")
-                        continue # ข้ามผู้เล่นคนนี้ไป
+                        continue
 
                 # ถ้า length เป็น 0 หมายถึงผู้เล่นคนนี้หลุดการเชื่อมต่อ
                 if length == 0:
                     if player_id in local_connections:
                         print(f"[Player {player_id}] Disconnection signal received. Closing local connection.")
-                        local_connections[player_id].close()
+                        local_connections[player_id].close() # Thread นี้เป็นผู้ปิดเท่านั้น
                         del local_connections[player_id]
                     continue
 
                 # ส่งข้อมูลไปยัง Local Service ที่ถูกต้อง
                 if player_id in local_connections:
-                    local_connections[player_id].sendall(data)
+                    try:
+                        local_connections[player_id].sendall(data)
+                    except OSError:
+                        # Socket อาจถูกปิดไปแล้ว
+                        pass
 
     except (ConnectionResetError, BrokenPipeError, OSError, ConnectionError) as e:
         print(f"[Tunnel] Connection error: {e}")
