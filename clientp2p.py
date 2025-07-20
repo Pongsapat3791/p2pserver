@@ -4,20 +4,27 @@ import threading
 import sys
 
 def forward_data(source_socket, dest_socket, direction):
-    """ฟังก์ชันสำหรับส่งต่อข้อมูลระหว่าง Socket สองตัว"""
+    """
+    [แก้ไข] ฟังก์ชันสำหรับส่งต่อข้อมูลระหว่าง Socket สองตัว
+    จัดการการปิดการเชื่อมต่ออย่างนุ่มนวลขึ้น
+    """
     try:
         while True:
             data = source_socket.recv(4096)
             if not data:
-                print(f"[{direction}] Connection closed. Shutting down.")
+                print(f"[{direction}] Connection closed by source. Shutting down destination write.")
                 break
             dest_socket.sendall(data)
-    except (ConnectionResetError, BrokenPipeError, OSError):
-        print(f"[{direction}] Connection lost.")
+    except (ConnectionResetError, BrokenPipeError, OSError) as e:
+        print(f"[{direction}] Connection lost: {e}")
     finally:
-        # ปิดการเชื่อมต่อเมื่อมีปัญหาหรือการเชื่อมต่อสิ้นสุด
-        source_socket.close()
-        dest_socket.close()
+        # เมื่อทิศทางหนึ่งจบลง เราจะส่งสัญญาณ shutdown ไปยังอีกฝั่ง
+        # เพื่อบอกว่าจะไม่มีข้อมูลส่งไปแล้ว แต่ยังเปิดรับข้อมูลที่ค้างอยู่ได้
+        try:
+            dest_socket.shutdown(socket.SHUT_WR)
+        except OSError:
+            # Socket อาจจะถูกปิดไปแล้วโดย thread อื่น ซึ่งไม่เป็นไร
+            pass
 
 def main():
     """ฟังก์ชันหลักของ Client"""
@@ -31,7 +38,6 @@ def main():
     LOCAL_PORT = int(sys.argv[3])
     LOCAL_HOST = '127.0.0.1'
 
-    # --- [แก้ไข] ประกาศตัวแปรเป็น None ก่อนเพื่อป้องกัน UnboundLocalError ---
     server_conn = None
     local_conn = None
     
@@ -54,7 +60,7 @@ def main():
             print("="*40)
         else:
             print(f"[-] Server responded with an error: {response}")
-            return # ออกจากโปรแกรมถ้า Server แจ้งข้อผิดพลาด
+            return
 
         # --- ส่วนที่ 3: เชื่อมต่อไปยัง Service ในเครื่อง (เช่น Minecraft) ---
         try:
@@ -65,7 +71,7 @@ def main():
         except ConnectionRefusedError:
             print(f"[!] Connection to local service at {LOCAL_HOST}:{LOCAL_PORT} was refused.")
             print("[!] Make sure your service (e.g., Minecraft server) is running before starting this script.")
-            return # ออกจากโปรแกรมถ้าเชื่อมต่อ Service ในเครื่องไม่ได้
+            return
 
         # --- ส่วนที่ 4: เริ่มกระบวนการส่งต่อข้อมูล (Relay) ---
         print("[*] Relay is now active. Forwarding data...")
@@ -83,8 +89,8 @@ def main():
 
         server_to_local_thread.join()
         local_to_server_thread.join()
+        print("[*] Both forwarding threads have finished.")
 
-    # --- [แก้ไข] แยกบล็อก except เพื่อแจ้งข้อผิดพลาดให้ชัดเจน ---
     except ConnectionRefusedError:
         print(f"[!] Connection to relay server {SERVER_IP}:{SERVER_PORT} was refused.")
         print("[!] Make sure the server script is running and the port is open on the firewall.")
@@ -93,8 +99,7 @@ def main():
     except Exception as e:
         print(f"[!] An unexpected error occurred: {e}")
     finally:
-        print("[*] Relay stopped.")
-        # --- [แก้ไข] ตรวจสอบว่าตัวแปรถูกสร้างค่าแล้วหรือยังก่อนปิด ---
+        print("[*] Relay stopped. Cleaning up sockets.")
         if server_conn:
             server_conn.close()
         if local_conn:
