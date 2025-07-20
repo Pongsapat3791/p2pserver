@@ -60,19 +60,30 @@ def forward_from_host_to_peers(host_conn, players, players_lock):
     """อ่านข้อมูลจาก Host, แกะ Header, แล้วส่งไปให้ผู้เล่น (Peer) ที่ถูกต้อง"""
     try:
         while True:
-            # อ่าน Header 8 bytes ก่อน
-            header_data = host_conn.recv(8)
-            if not header_data:
+            # [แก้ไข] อ่าน Header 8 bytes ให้ครบถ้วนเพื่อป้องกัน struct.error
+            header_buffer = b''
+            while len(header_buffer) < 8:
+                packet = host_conn.recv(8 - len(header_buffer))
+                if not packet:
+                    # การเชื่อมต่อถูกปิดจากฝั่ง Host
+                    header_buffer = None
+                    break
+                header_buffer += packet
+            
+            if not header_buffer:
+                # ออกจาก Loop หลักเมื่อ Host ปิดการเชื่อมต่อ
                 break
-            player_id, length = struct.unpack('!II', header_data)
+
+            player_id, length = struct.unpack('!II', header_buffer)
             
             # อ่านข้อมูลตามความยาวที่ระบุใน Header
             data = b''
-            while len(data) < length:
-                chunk = host_conn.recv(length - len(data))
-                if not chunk:
-                    raise ConnectionError("Host connection lost while reading data.")
-                data += chunk
+            if length > 0:
+                while len(data) < length:
+                    chunk = host_conn.recv(length - len(data))
+                    if not chunk:
+                        raise ConnectionError("Host connection lost while reading data payload.")
+                    data += chunk
 
             with players_lock:
                 if player_id in players:
