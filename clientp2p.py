@@ -23,39 +23,28 @@ def forward_data(source_socket, dest_socket, direction):
         except OSError:
             pass
 
-def main():
+def run_single_session(server_ip, server_port, local_port, local_host):
     """
-    [แก้ไข] ฟังก์ชันหลักของ Client
-    เปลี่ยนจากการวน Loop เป็นการทำงานแบบ 1 เซสชันต่อการรัน 1 ครั้งเพื่อแก้ปัญหา Loop ไม่รู้จบ
+    ฟังก์ชันสำหรับจัดการการเชื่อมต่อ 1 เซสชันเต็ม (เชื่อมต่อ, relay, จบการทำงาน)
     """
-    if len(sys.argv) != 4:
-        print("Usage: python client.py <server_ip> <server_port> <local_port>")
-        print("Example: python client.py 203.0.113.10 9000 25565")
-        sys.exit(1)
-
-    SERVER_IP = sys.argv[1]
-    SERVER_PORT = int(sys.argv[2])
-    LOCAL_PORT = int(sys.argv[3])
-    LOCAL_HOST = '127.0.0.1'
-    
     server_conn = None
     local_conn = None
     try:
         # --- ส่วนที่ 1: เชื่อมต่อไปยัง Server กลาง ---
         server_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        print(f"[*] Establishing tunnel to relay server {SERVER_IP}:{SERVER_PORT}...")
-        server_conn.connect((SERVER_IP, SERVER_PORT))
+        print(f"[*] Establishing tunnel to relay server {server_ip}:{server_port}...")
+        server_conn.connect((server_ip, server_port))
         
         response = server_conn.recv(1024).decode()
         if not response.startswith("PUBLIC_PORT:"):
             print(f"[-] Server error: {response}")
-            return
+            return # จบการทำงานของเซสชันนี้
         
         public_port = response.split(":")[1]
         print("="*40)
         print("  SUCCESS! TUNNEL IS ESTABLISHED.")
         print(f"  Your service is available at:")
-        print(f"  IP Address: {SERVER_IP}")
+        print(f"  IP Address: {server_ip}")
         print(f"  Port: {public_port}")
         print("  Waiting for a player to connect...")
         print("="*40)
@@ -65,12 +54,12 @@ def main():
         while True:
             try:
                 local_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                local_conn.connect((LOCAL_HOST, LOCAL_PORT))
-                print(f"[+] Connected to local service at {LOCAL_HOST}:{LOCAL_PORT}.")
+                local_conn.connect((local_host, local_port))
+                print(f"[+] Connected to local service at {local_host}:{local_port}.")
                 break # ออกจาก Loop เมื่อเชื่อมต่อสำเร็จ
             except ConnectionRefusedError:
-                print(f"[!] Connection to local service ({LOCAL_HOST}:{LOCAL_PORT}) refused. Is it running?")
-                print("[*] Retrying in 10 seconds... (Press Ctrl+C to stop)")
+                print(f"[!] Connection to local service ({local_host}:{local_port}) refused. Is it running?")
+                print("[*] Retrying in 10 seconds... (Press Ctrl+C to stop this session)")
                 time.sleep(10)
         
         # --- ส่วนที่ 3: เริ่ม Relay ข้อมูล ---
@@ -87,15 +76,47 @@ def main():
     except (ConnectionRefusedError, socket.timeout, OSError) as e:
         print(f"\n[!] Could not connect to relay server: {e}")
     except KeyboardInterrupt:
-        print("\n[*] Program stopped by user.")
+        # ดักจับ Ctrl+C ระหว่างรอเชื่อม local service
+        raise # ส่งต่อไปให้ loop หลักจัดการ
     except Exception as e:
-        print(f"\n[!] An unexpected error occurred: {e}")
+        print(f"\n[!] An unexpected error occurred in session: {e}")
     finally:
         if server_conn:
             server_conn.close()
         if local_conn:
             local_conn.close()
-        print("\n[*] Session ended. Program will now exit.")
+        print("\n[*] Session ended.")
+
+def main():
+    """
+    [แก้ไข] ฟังก์ชันหลักที่มี Loop ครอบการทำงานทั้งหมด
+    เพื่อให้โปรแกรมทำงานต่อเนื่องและเริ่มเซสชันใหม่เองอัตโนมัติ
+    """
+    if len(sys.argv) != 4:
+        print("Usage: python client.py <server_ip> <server_port> <local_port>")
+        print("Example: python client.py 203.0.113.10 9000 25565")
+        sys.exit(1)
+
+    SERVER_IP = sys.argv[1]
+    SERVER_PORT = int(sys.argv[2])
+    LOCAL_PORT = int(sys.argv[3])
+    LOCAL_HOST = '127.0.0.1'
+
+    try:
+        while True:
+            run_single_session(SERVER_IP, SERVER_PORT, LOCAL_PORT, LOCAL_HOST)
+            print("="*40)
+            print("  READY FOR A NEW SESSION.")
+            print("  Starting next session in 5 seconds...")
+            print("  (Press Ctrl+C to stop the program)")
+            print("="*40)
+            time.sleep(5)
+
+    except KeyboardInterrupt:
+        print("\n[*] Program stopped by user. Exiting.")
+    finally:
+        print("[*] Final cleanup complete.")
+
 
 if __name__ == "__main__":
     main()
