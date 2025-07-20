@@ -15,6 +15,7 @@ def forward_data(source_socket, dest_socket, direction):
     except (ConnectionResetError, BrokenPipeError, OSError):
         print(f"[{direction}] Connection lost.")
     finally:
+        # ปิดการเชื่อมต่อเมื่อมีปัญหาหรือการเชื่อมต่อสิ้นสุด
         source_socket.close()
         dest_socket.close()
 
@@ -25,21 +26,23 @@ def main():
         print("Example: python client.py 203.0.113.10 9000 25565")
         sys.exit(1)
 
-    # --- อ่านค่าจาก Command Line ---
     SERVER_IP = sys.argv[1]
     SERVER_PORT = int(sys.argv[2])
     LOCAL_PORT = int(sys.argv[3])
-    LOCAL_HOST = '127.0.0.1' # บริการที่รันบนเครื่องตัวเอง
-    # --------------------------------
+    LOCAL_HOST = '127.0.0.1'
 
+    # --- [แก้ไข] ประกาศตัวแปรเป็น None ก่อนเพื่อป้องกัน UnboundLocalError ---
+    server_conn = None
+    local_conn = None
+    
     try:
-        # 1. เชื่อมต่อไปยัง Server กลางเพื่อ "ลงทะเบียน"
+        # --- ส่วนที่ 1: เชื่อมต่อไปยัง Server กลาง ---
         server_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         print(f"[*] Connecting to relay server {SERVER_IP}:{SERVER_PORT}...")
         server_conn.connect((SERVER_IP, SERVER_PORT))
         print("[+] Connected to relay server.")
 
-        # 2. รอรับ Public Port จาก Server
+        # --- ส่วนที่ 2: รอรับ Public Port จาก Server ---
         response = server_conn.recv(1024).decode()
         if response.startswith("PUBLIC_PORT:"):
             public_port = response.split(":")[1]
@@ -51,24 +54,25 @@ def main():
             print("="*40)
         else:
             print(f"[-] Server responded with an error: {response}")
-            server_conn.close()
-            return
+            return # ออกจากโปรแกรมถ้า Server แจ้งข้อผิดพลาด
 
-        # 3. เชื่อมต่อไปยัง Service ที่รันในเครื่อง (เช่น Minecraft Server)
-        local_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        print(f"[*] Connecting to local service at {LOCAL_HOST}:{LOCAL_PORT}...")
-        local_conn.connect((LOCAL_HOST, LOCAL_PORT))
-        print(f"[+] Connected to local service.")
+        # --- ส่วนที่ 3: เชื่อมต่อไปยัง Service ในเครื่อง (เช่น Minecraft) ---
+        try:
+            local_conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            print(f"[*] Connecting to local service at {LOCAL_HOST}:{LOCAL_PORT}...")
+            local_conn.connect((LOCAL_HOST, LOCAL_PORT))
+            print(f"[+] Connected to local service.")
+        except ConnectionRefusedError:
+            print(f"[!] Connection to local service at {LOCAL_HOST}:{LOCAL_PORT} was refused.")
+            print("[!] Make sure your service (e.g., Minecraft server) is running before starting this script.")
+            return # ออกจากโปรแกรมถ้าเชื่อมต่อ Service ในเครื่องไม่ได้
 
+        # --- ส่วนที่ 4: เริ่มกระบวนการส่งต่อข้อมูล (Relay) ---
         print("[*] Relay is now active. Forwarding data...")
-
-        # 4. เริ่มกระบวนการส่งต่อข้อมูล (Relay)
-        # สร้าง Thread สำหรับส่งข้อมูลจาก Server -> Local Service
         server_to_local_thread = threading.Thread(
             target=forward_data,
             args=(server_conn, local_conn, "Server -> Local")
         )
-        # สร้าง Thread สำหรับส่งข้อมูลจาก Local Service -> Server
         local_to_server_thread = threading.Thread(
             target=forward_data,
             args=(local_conn, server_conn, "Local -> Server")
@@ -80,15 +84,21 @@ def main():
         server_to_local_thread.join()
         local_to_server_thread.join()
 
+    # --- [แก้ไข] แยกบล็อก except เพื่อแจ้งข้อผิดพลาดให้ชัดเจน ---
     except ConnectionRefusedError:
-        print(f"[!] Connection to local service at {LOCAL_HOST}:{LOCAL_PORT} was refused.")
-        print("[!] Make sure your service (e.g., Minecraft server) is running before starting this script.")
+        print(f"[!] Connection to relay server {SERVER_IP}:{SERVER_PORT} was refused.")
+        print("[!] Make sure the server script is running and the port is open on the firewall.")
+    except socket.timeout:
+        print(f"[!] Connection to relay server {SERVER_IP}:{SERVER_PORT} timed out.")
     except Exception as e:
-        print(f"[!] An error occurred: {e}")
+        print(f"[!] An unexpected error occurred: {e}")
     finally:
         print("[*] Relay stopped.")
-        server_conn.close()
-        local_conn.close()
+        # --- [แก้ไข] ตรวจสอบว่าตัวแปรถูกสร้างค่าแล้วหรือยังก่อนปิด ---
+        if server_conn:
+            server_conn.close()
+        if local_conn:
+            local_conn.close()
 
 if __name__ == "__main__":
     main()
