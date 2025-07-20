@@ -45,7 +45,9 @@ def forward_from_peer_to_host(peer_conn, host_conn, player_id, players_lock, pla
     finally:
         print(f"[Player {player_id}] Disconnected.")
         with players_lock:
-            del players[player_id]
+            # [แก้ไข] เพิ่มการตรวจสอบก่อนลบเพื่อป้องกัน KeyError
+            if player_id in players:
+                del players[player_id]
         # แจ้งให้ Host รู้ว่าผู้เล่นคนนี้หลุดการเชื่อมต่อแล้ว
         try:
             header = struct.pack('!II', player_id, 0) # ส่งข้อมูลความยาว 0
