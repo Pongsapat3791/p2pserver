@@ -73,7 +73,7 @@ class ClientLogicThread(threading.Thread):
             self._put_status('stopped', "Connection closed.")
 
     def _request_public_port(self):
-        """Requests a public port from the server's control port."""
+        """Requests a public port from the server's Server port."""
         try:
             req_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             req_socket.connect((self.server_ip, self.control_port))
@@ -206,7 +206,7 @@ class P2PClientGUI:
         self.ip_entry = tk.Entry(top_frame, textvariable=self.ip_var)
         self.ip_entry.grid(row=0, column=1, sticky="ew")
 
-        tk.Label(top_frame, text="Control Port:").grid(row=1, column=0, sticky="w")
+        tk.Label(top_frame, text="Server Port:").grid(row=1, column=0, sticky="w")
         self.control_port_entry = tk.Entry(top_frame, textvariable=self.control_port_var)
         self.control_port_entry.grid(row=1, column=1, sticky="ew")
 
